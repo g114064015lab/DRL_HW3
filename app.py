@@ -27,6 +27,114 @@ def render_board_html(board_array):
     html += '</table>'
     return html
 
+# ----------------- Components for Rainbow -----------------
+class NoisyLinear(nn.Module):
+    def __init__(self, in_features, out_features, std_init=0.5):
+        super(NoisyLinear, self).__init__()
+        self.in_features = in_features
+        self.out_features = out_features
+        self.std_init = std_init
+
+        self.weight_mu = nn.Parameter(torch.empty(out_features, in_features))
+        self.weight_sigma = nn.Parameter(torch.empty(out_features, in_features))
+        self.register_buffer('weight_epsilon', torch.empty(out_features, in_features))
+
+        self.bias_mu = nn.Parameter(torch.empty(out_features))
+        self.bias_sigma = nn.Parameter(torch.empty(out_features))
+        self.register_buffer('bias_epsilon', torch.empty(out_features))
+
+        self.reset_parameters()
+        self.reset_noise()
+
+    def reset_parameters(self):
+        mu_range = 1 / np.sqrt(self.in_features)
+        self.weight_mu.data.uniform_(-mu_range, mu_range)
+        self.weight_sigma.data.fill_(self.std_init / np.sqrt(self.in_features))
+        self.bias_mu.data.uniform_(-mu_range, mu_range)
+        self.bias_sigma.data.fill_(self.std_init / np.sqrt(self.out_features))
+
+    def _scale_noise(self, size):
+        x = torch.randn(size)
+        return x.sign().mul_(x.abs().sqrt_())
+
+    def reset_noise(self):
+        epsilon_in = self._scale_noise(self.in_features)
+        epsilon_out = self._scale_noise(self.out_features)
+        self.weight_epsilon.copy_(epsilon_out.outer(epsilon_in))
+        self.bias_epsilon.copy_(epsilon_out)
+
+    def forward(self, x):
+        if self.training:
+            weight = self.weight_mu + self.weight_sigma * self.weight_epsilon
+            bias = self.bias_mu + self.bias_sigma * self.bias_epsilon
+        else:
+            weight = self.weight_mu
+            bias = self.bias_mu
+        return nn.functional.linear(x, weight, bias)
+
+class PrioritizedReplayBuffer:
+    def __init__(self, capacity, alpha=0.6):
+        self.capacity = capacity
+        self.alpha = alpha
+        self.buffer = []
+        self.priorities = np.zeros(capacity, dtype=np.float32)
+        self.pos = 0
+
+    def push(self, state, action, reward, next_state, done):
+        max_prio = self.priorities.max() if self.buffer else 1.0
+        
+        if len(self.buffer) < self.capacity:
+            self.buffer.append((state, action, reward, next_state, done))
+        else:
+            self.buffer[self.pos] = (state, action, reward, next_state, done)
+            
+        self.priorities[self.pos] = max_prio
+        self.pos = (self.pos + 1) % self.capacity
+
+    def sample(self, batch_size, beta=0.4):
+        if len(self.buffer) == self.capacity:
+            prios = self.priorities
+        else:
+            prios = self.priorities[:self.pos]
+            
+        probs = prios ** self.alpha
+        if probs.sum() > 0:
+            probs /= probs.sum()
+        else:
+            probs = np.ones(len(self.buffer)) / len(self.buffer)
+        
+        indices = np.random.choice(len(self.buffer), batch_size, p=probs)
+        samples = [self.buffer[idx] for idx in indices]
+        
+        total = len(self.buffer)
+        weights = (total * probs[indices]) ** (-beta)
+        weights /= weights.max()
+        weights = np.array(weights, dtype=np.float32)
+        
+        state, action, reward, next_state, done = zip(*samples)
+        return np.stack(state), action, reward, np.stack(next_state), done, indices, weights
+
+    def update_priorities(self, batch_indices, batch_priorities):
+        for idx, prio in zip(batch_indices, batch_priorities):
+            self.priorities[idx] = prio
+            
+    def __len__(self):
+        return len(self.buffer)
+
+class ReplayBuffer:
+    def __init__(self, capacity):
+        self.buffer = deque(maxlen=capacity)
+
+    def push(self, state, action, reward, next_state, done):
+        self.buffer.append((state, action, reward, next_state, done))
+
+    def sample(self, batch_size):
+        state, action, reward, next_state, done = zip(*random.sample(self.buffer, batch_size))
+        return np.stack(state), action, reward, np.stack(next_state), done
+
+    def __len__(self):
+        return len(self.buffer)
+
 # ----------------- Networks -----------------
 class QNetwork(nn.Module):
     def __init__(self, state_size, action_size):
@@ -47,34 +155,37 @@ class DuelingQNetwork(nn.Module):
         self.fc1 = nn.Linear(state_size, 64)
         self.relu = nn.ReLU()
         self.fc2 = nn.Linear(64, 64)
-        
         self.value_stream = nn.Linear(64, 1)
         self.advantage_stream = nn.Linear(64, action_size)
 
     def forward(self, x):
         x = self.relu(self.fc1(x))
         x = self.relu(self.fc2(x))
-        
         values = self.value_stream(x)
         advantages = self.advantage_stream(x)
-        
         qvals = values + (advantages - advantages.mean(dim=1, keepdim=True))
         return qvals
 
-# ----------------- Replay Buffer -----------------
-class ReplayBuffer:
-    def __init__(self, capacity):
-        self.buffer = deque(maxlen=capacity)
+class RainbowQNetwork(nn.Module):
+    def __init__(self, state_size, action_size):
+        super(RainbowQNetwork, self).__init__()
+        self.fc1 = nn.Linear(state_size, 64)
+        self.relu = nn.ReLU()
+        self.fc2 = nn.Linear(64, 64)
+        self.value_stream = NoisyLinear(64, 1)
+        self.advantage_stream = NoisyLinear(64, action_size)
 
-    def push(self, state, action, reward, next_state, done):
-        self.buffer.append((state, action, reward, next_state, done))
-
-    def sample(self, batch_size):
-        state, action, reward, next_state, done = zip(*random.sample(self.buffer, batch_size))
-        return np.stack(state), action, reward, np.stack(next_state), done
-
-    def __len__(self):
-        return len(self.buffer)
+    def forward(self, x):
+        x = self.relu(self.fc1(x))
+        x = self.relu(self.fc2(x))
+        values = self.value_stream(x)
+        advantages = self.advantage_stream(x)
+        qvals = values + (advantages - advantages.mean(dim=1, keepdim=True))
+        return qvals
+        
+    def reset_noise(self):
+        self.value_stream.reset_noise()
+        self.advantage_stream.reset_noise()
 
 # ----------------- Agents -----------------
 class DQNAgent:
@@ -99,11 +210,8 @@ class DQNAgent:
             return torch.argmax(q_values).item()
 
     def train_step(self, batch_size):
-        if len(self.memory) < batch_size:
-            return None
-
+        if len(self.memory) < batch_size: return None
         states, actions, rewards, next_states, dones = self.memory.sample(batch_size)
-
         states = torch.FloatTensor(states)
         actions = torch.LongTensor(actions).unsqueeze(1)
         rewards = torch.FloatTensor(rewards).unsqueeze(1)
@@ -111,17 +219,14 @@ class DQNAgent:
         dones = torch.FloatTensor(dones).unsqueeze(1)
 
         q_values = self.q_network(states).gather(1, actions)
-
         with torch.no_grad():
             max_next_q_values = self.q_network(next_states).max(1)[0].unsqueeze(1)
             target_q_values = rewards + (1 - dones) * self.gamma * max_next_q_values
 
         loss = self.loss_fn(q_values, target_q_values)
-
         self.optimizer.zero_grad()
         loss.backward()
         self.optimizer.step()
-
         return loss.item()
 
 class EnhancedDQNAgent:
@@ -141,7 +246,6 @@ class EnhancedDQNAgent:
             
         self.target_network.load_state_dict(self.q_network.state_dict())
         self.target_network.eval()
-        
         self.optimizer = optim.Adam(self.q_network.parameters(), lr=lr)
         self.loss_fn = nn.MSELoss()
         self.memory = ReplayBuffer(1000)
@@ -149,20 +253,15 @@ class EnhancedDQNAgent:
         self.gamma = 0.9
 
     def act(self, state):
-        if random.random() < self.epsilon:
-            return random.randint(0, self.action_size - 1)
-        else:
-            state_tensor = torch.FloatTensor(state).unsqueeze(0)
-            with torch.no_grad():
-                q_values = self.q_network(state_tensor)
-            return torch.argmax(q_values).item()
+        if random.random() < self.epsilon: return random.randint(0, self.action_size - 1)
+        state_tensor = torch.FloatTensor(state).unsqueeze(0)
+        with torch.no_grad():
+            q_values = self.q_network(state_tensor)
+        return torch.argmax(q_values).item()
 
     def train_step(self, batch_size):
-        if len(self.memory) < batch_size:
-            return None
-
+        if len(self.memory) < batch_size: return None
         states, actions, rewards, next_states, dones = self.memory.sample(batch_size)
-
         states = torch.FloatTensor(states)
         actions = torch.LongTensor(actions).unsqueeze(1)
         rewards = torch.FloatTensor(rewards).unsqueeze(1)
@@ -170,24 +269,75 @@ class EnhancedDQNAgent:
         dones = torch.FloatTensor(dones).unsqueeze(1)
 
         q_values = self.q_network(states).gather(1, actions)
-
         with torch.no_grad():
             if self.is_double:
-                # Double DQN
                 best_actions = self.q_network(next_states).argmax(1).unsqueeze(1)
                 max_next_q_values = self.target_network(next_states).gather(1, best_actions)
             else:
-                # Standard Target DQN
                 max_next_q_values = self.target_network(next_states).max(1)[0].unsqueeze(1)
-                
             target_q_values = rewards + (1 - dones) * self.gamma * max_next_q_values
 
         loss = self.loss_fn(q_values, target_q_values)
-
         self.optimizer.zero_grad()
         loss.backward()
         self.optimizer.step()
+        return loss.item()
+        
+    def update_target_network(self):
+        self.target_network.load_state_dict(self.q_network.state_dict())
 
+class RainbowDQNAgent:
+    """HW3-4 Simplified Rainbow DQN (Double + Dueling + PER + Noisy)"""
+    def __init__(self, state_size, action_size, lr):
+        self.state_size = state_size
+        self.action_size = action_size
+        
+        self.q_network = RainbowQNetwork(state_size, action_size)
+        self.target_network = RainbowQNetwork(state_size, action_size)
+        self.target_network.load_state_dict(self.q_network.state_dict())
+        self.target_network.eval()
+        
+        self.optimizer = optim.Adam(self.q_network.parameters(), lr=lr)
+        self.memory = PrioritizedReplayBuffer(1000)
+        self.gamma = 0.9
+        self.beta = 0.4
+        self.beta_increment_per_sampling = 0.001
+
+    def act(self, state):
+        state_tensor = torch.FloatTensor(state).unsqueeze(0)
+        with torch.no_grad():
+            q_values = self.q_network(state_tensor)
+        return torch.argmax(q_values).item()
+
+    def train_step(self, batch_size):
+        if len(self.memory) < batch_size: return None
+        states, actions, rewards, next_states, dones, indices, weights = self.memory.sample(batch_size, self.beta)
+        self.beta = np.min([1.0, self.beta + self.beta_increment_per_sampling])
+        
+        states = torch.FloatTensor(states)
+        actions = torch.LongTensor(actions).unsqueeze(1)
+        rewards = torch.FloatTensor(rewards).unsqueeze(1)
+        next_states = torch.FloatTensor(next_states)
+        dones = torch.FloatTensor(dones).unsqueeze(1)
+        weights = torch.FloatTensor(weights).unsqueeze(1)
+
+        self.q_network.reset_noise()
+        self.target_network.reset_noise()
+
+        q_values = self.q_network(states).gather(1, actions)
+        with torch.no_grad():
+            best_actions = self.q_network(next_states).argmax(1).unsqueeze(1)
+            max_next_q_values = self.target_network(next_states).gather(1, best_actions)
+            target_q_values = rewards + (1 - dones) * self.gamma * max_next_q_values
+
+        td_errors = torch.abs(q_values - target_q_values).detach().numpy()
+        self.memory.update_priorities(indices, td_errors + 1e-5)
+
+        loss = (weights * (q_values - target_q_values)**2).mean()
+        self.optimizer.zero_grad()
+        loss.backward()
+        nn.utils.clip_grad_norm_(self.q_network.parameters(), 1.0)
+        self.optimizer.step()
         return loss.item()
         
     def update_target_network(self):
@@ -214,24 +364,20 @@ class LightningDQN(pl.LightningModule):
         self.memory = ReplayBuffer(1000)
         self.env = Gridworld(size=4, mode='random')
         self.action_map = {0: 'u', 1: 'd', 2: 'l', 3: 'r'}
-        
         self.last_epoch_reward = 0
-        self.automatic_optimization = False # Manual optimization to control env loop
+        self.automatic_optimization = False 
 
     def configure_optimizers(self):
         optimizer = optim.Adam(self.q_network.parameters(), lr=self.lr)
-        # Training Tip: LR Scheduling
         scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=200, gamma=0.9)
         return [optimizer], [scheduler]
         
     def act(self, state):
-        if random.random() < self.epsilon:
-            return random.randint(0, 3)
-        else:
-            state_tensor = torch.FloatTensor(state).unsqueeze(0).to(self.device)
-            with torch.no_grad():
-                q_values = self.q_network(state_tensor)
-            return torch.argmax(q_values).item()
+        if random.random() < self.epsilon: return random.randint(0, 3)
+        state_tensor = torch.FloatTensor(state).unsqueeze(0).to(self.device)
+        with torch.no_grad():
+            q_values = self.q_network(state_tensor)
+        return torch.argmax(q_values).item()
 
     def training_step(self, batch, batch_idx):
         opt = self.optimizers()
@@ -245,7 +391,6 @@ class LightningDQN(pl.LightningModule):
         for step in range(self.max_steps):
             action_idx = self.act(state)
             action = self.action_map[action_idx]
-            
             self.env.makeMove(action)
             reward = self.env.reward()
             next_state = self.env.board.render_np().flatten()
@@ -269,21 +414,17 @@ class LightningDQN(pl.LightningModule):
                     target_q_values = rewards + (1 - dones) * self.gamma * max_next_q_values
                     
                 loss = self.loss_fn(q_values, target_q_values)
-                
                 opt.zero_grad()
                 self.manual_backward(loss)
-                # Training Tip: Gradient Clipping
                 self.clip_gradients(opt, gradient_clip_val=1.0, gradient_clip_algorithm="norm")
                 opt.step()
                 
                 loss_sum += loss.item()
                 loss_count += 1
                 
-            if done:
-                break
+            if done: break
                 
-        sch.step() # step LR scheduler per epoch
-        
+        sch.step()
         self.epsilon = max(self.epsilon_min, self.epsilon * self.epsilon_decay)
         self.last_epoch_reward = total_reward
         
@@ -292,7 +433,6 @@ class LightningDQN(pl.LightningModule):
             
         avg_loss = loss_sum / loss_count if loss_count > 0 else 0.0
         self.log('train_loss', avg_loss, prog_bar=True)
-        
         self.env = Gridworld(size=4, mode='random')
         return None
 
@@ -320,18 +460,15 @@ class StreamlitLightningCallback(pl.Callback):
         if epoch % 20 == 0 or epoch == self.max_epochs - 1:
             self.progress_bar.progress((epoch + 1) / self.max_epochs)
             self.status_text.text(f"Epoch {epoch}/{self.max_epochs} | Reward: {reward} | Epsilon: {pl_module.epsilon:.2f} | LR: {trainer.optimizers[0].param_groups[0]['lr']:.5f}")
-            
             fig, ax = plt.subplots(1, 2, figsize=(10, 4))
             ax[0].plot(self.rewards_history)
             ax[0].set_title("Total Reward")
             ax[0].set_xlabel("Epoch")
             ax[0].set_ylabel("Reward")
-            
             ax[1].plot(self.loss_history, color='orange')
             ax[1].set_title("Average Loss")
             ax[1].set_xlabel("Epoch")
             ax[1].set_ylabel("Loss")
-            
             self.chart_empty.pyplot(fig)
             plt.close(fig)
 
@@ -342,7 +479,8 @@ st.title("DRL HW3: Deep Q-Network Variants")
 assignment_part = st.sidebar.selectbox("Assignment Part", [
     "HW3-1: Naive DQN (Static Mode)",
     "HW3-2: Enhanced DQN (Player Mode)",
-    "HW3-3: PyTorch Lightning (Random Mode)"
+    "HW3-3: PyTorch Lightning (Random Mode)",
+    "HW3-4: Rainbow DQN (Random Mode)"
 ])
 
 st.sidebar.header("Hyperparameters")
@@ -352,7 +490,6 @@ epsilon_decay = st.sidebar.slider("Epsilon Decay", 0.9, 0.999, 0.99, step=0.001)
 batch_size = st.sidebar.slider("Batch Size", 16, 128, 32)
 max_steps = 50
 
-# Specific toggles for HW3-2
 is_double = False
 is_dueling = False
 if "HW3-2" in assignment_part:
@@ -372,153 +509,159 @@ if st.button("Start Training"):
         env = Gridworld(size=4, mode='static')
         state_size = env.board.render_np().size
         agent = DQNAgent(state_size, action_size, learning_rate)
-        
         rewards_history = []
         loss_history = []
-        
         for epoch in range(epochs):
             env = Gridworld(size=4, mode='static')
             state = env.board.render_np().flatten()
-            total_reward = 0
-            loss_sum = 0
-            loss_count = 0
-            
+            total_reward, loss_sum, loss_count = 0, 0, 0
             for step in range(max_steps):
                 action_idx = agent.act(state)
-                action = action_map[action_idx]
-                env.makeMove(action)
+                env.makeMove(action_map[action_idx])
                 reward = env.reward()
                 next_state = env.board.render_np().flatten()
                 done = reward == 10 or reward == -10
-                
                 agent.memory.push(state, action_idx, reward, next_state, done)
                 state = next_state
                 total_reward += reward
-                
                 loss = agent.train_step(batch_size)
                 if loss is not None:
-                    loss_sum += loss
-                    loss_count += 1
+                    loss_sum += loss; loss_count += 1
                 if done: break
-                    
             agent.epsilon = max(0.01, agent.epsilon * epsilon_decay)
             rewards_history.append(total_reward)
             loss_history.append(loss_sum / loss_count if loss_count > 0 else 0)
-                
             if epoch % 20 == 0 or epoch == epochs - 1:
                 progress_bar.progress((epoch + 1) / epochs)
                 status_text.text(f"Epoch {epoch}/{epochs} | Reward: {total_reward} | Epsilon: {agent.epsilon:.2f}")
                 fig, ax = plt.subplots(1, 2, figsize=(10, 4))
-                ax[0].plot(rewards_history)
-                ax[0].set_title("Total Reward")
-                ax[1].plot(loss_history, color='orange')
-                ax[1].set_title("Average Loss")
-                chart_empty.pyplot(fig)
-                plt.close(fig)
+                ax[0].plot(rewards_history); ax[0].set_title("Total Reward")
+                ax[1].plot(loss_history, color='orange'); ax[1].set_title("Average Loss")
+                chart_empty.pyplot(fig); plt.close(fig)
                 
     elif "HW3-2" in assignment_part:
         env = Gridworld(size=4, mode='player')
         state_size = env.board.render_np().size
         agent = EnhancedDQNAgent(state_size, action_size, learning_rate, is_dueling=is_dueling, is_double=is_double)
-        
         rewards_history = []
         loss_history = []
-        
         for epoch in range(epochs):
             env = Gridworld(size=4, mode='player')
             state = env.board.render_np().flatten()
-            total_reward = 0
-            loss_sum = 0
-            loss_count = 0
-            
+            total_reward, loss_sum, loss_count = 0, 0, 0
             for step in range(max_steps):
                 action_idx = agent.act(state)
-                action = action_map[action_idx]
-                env.makeMove(action)
+                env.makeMove(action_map[action_idx])
                 reward = env.reward()
                 next_state = env.board.render_np().flatten()
                 done = reward == 10 or reward == -10
-                
                 agent.memory.push(state, action_idx, reward, next_state, done)
                 state = next_state
                 total_reward += reward
-                
                 loss = agent.train_step(batch_size)
                 if loss is not None:
-                    loss_sum += loss
-                    loss_count += 1
+                    loss_sum += loss; loss_count += 1
                 if done: break
-                    
             agent.epsilon = max(0.01, agent.epsilon * epsilon_decay)
-            
-            if epoch % 10 == 0:
-                agent.update_target_network()
-                
+            if epoch % 10 == 0: agent.update_target_network()
             rewards_history.append(total_reward)
             loss_history.append(loss_sum / loss_count if loss_count > 0 else 0)
-                
             if epoch % 20 == 0 or epoch == epochs - 1:
                 progress_bar.progress((epoch + 1) / epochs)
                 status_text.text(f"Epoch {epoch}/{epochs} | Reward: {total_reward} | Epsilon: {agent.epsilon:.2f}")
                 fig, ax = plt.subplots(1, 2, figsize=(10, 4))
-                ax[0].plot(rewards_history)
-                ax[0].set_title("Total Reward")
-                ax[1].plot(loss_history, color='orange')
-                ax[1].set_title("Average Loss")
-                chart_empty.pyplot(fig)
-                plt.close(fig)
+                ax[0].plot(rewards_history); ax[0].set_title("Total Reward")
+                ax[1].plot(loss_history, color='orange'); ax[1].set_title("Average Loss")
+                chart_empty.pyplot(fig); plt.close(fig)
                 
     elif "HW3-3" in assignment_part:
         env = Gridworld(size=4, mode='random')
         state_size = env.board.render_np().size
-        
         pl_agent = LightningDQN(state_size, action_size, learning_rate, max_steps, epsilon_decay)
-        
         cb = StreamlitLightningCallback(progress_bar, status_text, chart_empty, epochs)
         trainer = pl.Trainer(max_epochs=epochs, callbacks=[cb], enable_progress_bar=False, enable_model_summary=False, logger=False)
-        
         trainer.fit(pl_agent)
-        agent = pl_agent # For test run
+        agent = pl_agent
+        
+    elif "HW3-4" in assignment_part:
+        env = Gridworld(size=4, mode='random')
+        state_size = env.board.render_np().size
+        agent = RainbowDQNAgent(state_size, action_size, learning_rate)
+        rewards_history = []
+        loss_history = []
+        for epoch in range(epochs):
+            env = Gridworld(size=4, mode='random')
+            state = env.board.render_np().flatten()
+            total_reward, loss_sum, loss_count = 0, 0, 0
+            for step in range(max_steps):
+                action_idx = agent.act(state)
+                env.makeMove(action_map[action_idx])
+                reward = env.reward()
+                next_state = env.board.render_np().flatten()
+                done = reward == 10 or reward == -10
+                agent.memory.push(state, action_idx, reward, next_state, done)
+                state = next_state
+                total_reward += reward
+                loss = agent.train_step(batch_size)
+                if loss is not None:
+                    loss_sum += loss; loss_count += 1
+                if done: break
+            if epoch % 10 == 0: agent.update_target_network()
+            rewards_history.append(total_reward)
+            loss_history.append(loss_sum / loss_count if loss_count > 0 else 0)
+            if epoch % 20 == 0 or epoch == epochs - 1:
+                progress_bar.progress((epoch + 1) / epochs)
+                status_text.text(f"Epoch {epoch}/{epochs} | Reward: {total_reward} | (NoisyNet Auto-Exploration)")
+                fig, ax = plt.subplots(1, 2, figsize=(10, 4))
+                ax[0].plot(rewards_history); ax[0].set_title("Total Reward")
+                ax[1].plot(loss_history, color='orange'); ax[1].set_title("Average Loss")
+                chart_empty.pyplot(fig); plt.close(fig)
         
     progress_bar.progress(1.0)
     status_text.text("Training Finished!")
     
-    st.subheader("Test Run (Greedy Policy)")
-    if "HW3-1" in assignment_part:
-        env = Gridworld(size=4, mode='static')
-    elif "HW3-2" in assignment_part:
-        env = Gridworld(size=4, mode='player')
-    else:
-        env = Gridworld(size=4, mode='random')
-        
-    state = env.board.render_np().flatten()
-    agent.epsilon = 0.0 # pure greedy
+    st.subheader("Test Run (Animation Loop)")
+    st.markdown("Watching the agent play continuously. Adjust sidebar to stop.")
     
-    test_steps = [(env.display(), "Start", 0)]
-    for step in range(max_steps):
-        action_idx = agent.act(state)
-        action = action_map[action_idx]
-        env.makeMove(action)
-        reward = env.reward()
-        done = reward == 10 or reward == -10
-        test_steps.append((env.display(), action, reward))
-        if done: break
-        state = env.board.render_np().flatten()
-        
     board_placeholder = st.empty()
     status_placeholder = st.empty()
     
-    for i, (board_display, action, reward) in enumerate(test_steps):
-        board_placeholder.markdown(render_board_html(board_display), unsafe_allow_html=True)
+    if "HW3-4" in assignment_part:
+        agent.q_network.eval() # Disable noise for evaluation
         
-        status_info = f"**Step {i}**: Action: `{action}`, Reward: `{reward}`"
-        if reward == 10:
-            status_info += "\n\n🎉 **Goal Reached!**"
-            status_placeholder.success(status_info)
-        elif reward == -10:
-            status_info += "\n\n💥 **Fell into Pit!**"
-            status_placeholder.error(status_info)
+    # Infinite loop for animation
+    while True:
+        if "HW3-1" in assignment_part:
+            env = Gridworld(size=4, mode='static')
+        elif "HW3-2" in assignment_part:
+            env = Gridworld(size=4, mode='player')
         else:
-            status_placeholder.info(status_info)
+            env = Gridworld(size=4, mode='random')
             
-        time.sleep(0.5)
+        state = env.board.render_np().flatten()
+        if hasattr(agent, 'epsilon'):
+            agent.epsilon = 0.0 # pure greedy for evaluation
+            
+        test_steps = [(env.display(), "Start", 0)]
+        for step in range(max_steps):
+            action_idx = agent.act(state)
+            action = action_map[action_idx]
+            env.makeMove(action)
+            reward = env.reward()
+            done = reward == 10 or reward == -10
+            test_steps.append((env.display(), action, reward))
+            if done: break
+            state = env.board.render_np().flatten()
+            
+        for i, (board_display, action, reward) in enumerate(test_steps):
+            board_placeholder.markdown(render_board_html(board_display), unsafe_allow_html=True)
+            status_info = f"**Step {i}**: Action: `{action}`, Reward: `{reward}`"
+            if reward == 10:
+                status_placeholder.success(status_info + "\n\n🎉 **Goal Reached!**")
+            elif reward == -10:
+                status_placeholder.error(status_info + "\n\n💥 **Fell into Pit!**")
+            else:
+                status_placeholder.info(status_info)
+            time.sleep(0.5)
+            
+        time.sleep(2.0) # Wait 2 seconds before restarting the episode loop

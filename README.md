@@ -25,8 +25,16 @@ The Gridworld environment files (`Gridworld.py` and `GridBoard.py`) are referenc
 - **Environment**: Random mode (all pieces spawn in random locations).
 - **Framework Conversion**: Converted the DQN training pipeline into a **PyTorch Lightning** module (`pl.LightningModule`), offering a more structured training loop and easy integrations.
 - **Training Tips**: 
-  - **Learning Rate Scheduling**: Applied `StepLR` to decay the learning rate as epochs progress, helping to converge fine-grained details later in training.
-  - **Gradient Clipping**: Applied gradient clipping (`gradient_clip_val=1.0`) to prevent exploding gradients and stabilize the neural network updates when facing random, high-variance states.
+  - **Learning Rate Scheduling**: Applied `StepLR` to decay the learning rate as epochs progress.
+  - **Gradient Clipping**: Applied gradient clipping (`gradient_clip_val=1.0`) to prevent exploding gradients.
+
+### HW3-4: Rainbow DQN (Bonus)
+- **Environment**: Random mode.
+- **Implementation**: Implemented a "Simplified Rainbow DQN" combining four major advancements over DQN:
+  - **Double DQN**: Addresses overestimation bias.
+  - **Dueling DQN**: Improves state value approximation.
+  - **Prioritized Experience Replay (PER)**: Replays transitions with high expected learning progress (measured by TD-error).
+  - **Noisy Nets**: Replaces $\epsilon$-greedy exploration with learned parameter noise, allowing the network to drive its own exploration.
 
 ## Running Locally
 To run this application locally, ensure you have the necessary dependencies installed:

@@ -47,3 +47,21 @@ Converting the model to `pl.LightningModule` provides a robust, scalable framewo
 ### 2. Training Tips
 - **Gradient Clipping**: Random modes cause high variance in rewards (e.g., spawning immediately next to a pit). This can cause huge loss spikes and "exploding gradients". We apply `clip_gradients(norm=1.0)` to ensure weight updates stay bounded and stable.
 - **Learning Rate Scheduling (`StepLR`)**: At the beginning of training, a higher learning rate allows rapid exploration. As epochs progress, `StepLR` decays the learning rate (e.g., $\gamma = 0.9$ every 200 epochs). This helps the network converge securely in the noisy, randomized state space rather than oscillating wildly.
+
+---
+
+## HW3-4: Rainbow DQN (Bonus)
+
+To fully tackle the `random` mode Gridworld, we implemented a **Simplified Rainbow DQN**, bringing together multiple state-of-the-art enhancements:
+
+### 1. Noisy Nets for Exploration
+**Improvement**: Instead of using heuristic $\epsilon$-greedy exploration (randomly choosing actions), we replaced standard linear layers with `NoisyLinear` layers. These layers add parametric Gaussian noise to the weights and biases.
+- The network "learns" how much noise (exploration) to inject based on the training loss. Over time, it naturally phases out noise as it becomes more confident in the Q-values.
+
+### 2. Prioritized Experience Replay (PER)
+**Improvement**: Standard Replay Buffers sample transitions uniformly. PER samples transitions based on their **TD-error** (Temporal Difference error).
+- Transitions that "surprised" the network (high TD-error) have a higher probability of being sampled.
+- We use Importance Sampling (IS) weights to correct for the sampling bias introduced by this prioritized replay.
+
+### 3. Combining with Double & Dueling DQN
+The Rainbow DQN effectively combines **Noisy Nets** and **PER** with the aforementioned **Double Q-learning** and **Dueling Network Architecture**. The combination of these techniques results in much faster convergence and more robust policies compared to any single enhancement alone.
