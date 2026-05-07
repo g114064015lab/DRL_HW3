@@ -474,7 +474,6 @@ class StreamlitLightningCallback(pl.Callback):
 
 # ----------------- Streamlit UI -----------------
 st.set_page_config(page_title="DRL HW3: DQN Variants", layout="wide")
-st.title("DRL HW3: Deep Q-Network Variants")
 
 assignment_part = st.sidebar.selectbox("Assignment Part", [
     "HW3-1: Naive DQN (Static Mode)",
@@ -482,6 +481,8 @@ assignment_part = st.sidebar.selectbox("Assignment Part", [
     "HW3-3: PyTorch Lightning (Random Mode)",
     "HW3-4: Rainbow DQN (Random Mode)"
 ])
+
+st.title(f"DRL {assignment_part}")
 
 st.sidebar.header("Hyperparameters")
 learning_rate = st.sidebar.number_input("Learning Rate", value=1e-3, format="%.4f")
