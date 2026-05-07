@@ -22,7 +22,7 @@ def render_board_html(board_array):
             elif cell == '-': color = "#F44336; color: white;" # Red Pit
             elif cell == 'W': color = "#9E9E9E; color: white;" # Grey Wall
             else: color = "#f0f2f6; color: black;" # Empty cell
-            html += f'<td style="width: 60px; height: 60px; border: 2px solid #ccc; background: {color} font-weight: bold; font-size: 24px;">{cell}</td>'
+            html += f'<td style="width: 100px; height: 100px; border: 2px solid #ccc; background: {color} font-weight: bold; font-size: 40px;">{cell}</td>'
         html += '</tr>'
     html += '</table>'
     return html
