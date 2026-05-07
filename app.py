@@ -623,6 +623,13 @@ if st.button("Start Training"):
     
     st.subheader("Test Run (Animation Loop)")
     st.markdown("Watching the agent play continuously. Adjust sidebar to stop.")
+    st.markdown("""
+    **Legend**:
+    - 🟢 `P` (Player) 標示為綠色底
+    - 🌟 `+` (Goal) 標示為金色底
+    - 💥 `-` (Pit) 標示為紅色底
+    - 🧱 `W` (Wall) 標示為灰色底
+    """)
     
     board_placeholder = st.empty()
     status_placeholder = st.empty()
