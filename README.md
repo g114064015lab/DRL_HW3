@@ -9,6 +9,19 @@ This repository contains the implementation of a Deep Q-Network (DQN) and its va
 The Gridworld environment files (`Gridworld.py` and `GridBoard.py`) are referenced and used from:
 - [DeepReinforcementLearningInAction/tree/master](https://github.com/DeepReinforcementLearning/DeepReinforcementLearningInAction/tree/master)
 
+## Project Structure
+```text
+DRL_HW3/
+├── app.py                # Main Streamlit application and agent orchestrator
+├── Gridworld.py          # Environment dynamics
+├── GridBoard.py          # Environment rendering logic
+├── requirements.txt      # Python dependencies
+├── start.sh              # Initialization and daemon execution script
+├── ending.sh             # Graceful shutdown and archiving script
+├── docs/                 # Documentation (SDD, Reports, Conversation Logs)
+└── logs/ models/ results/# Dynamically generated output folders
+```
+
 ## Assignment Details
 
 ### HW3-1: Naive DQN for Static Mode
