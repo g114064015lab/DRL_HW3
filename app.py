@@ -330,7 +330,7 @@ class RainbowDQNAgent:
             max_next_q_values = self.target_network(next_states).gather(1, best_actions)
             target_q_values = rewards + (1 - dones) * self.gamma * max_next_q_values
 
-        td_errors = torch.abs(q_values - target_q_values).detach().numpy()
+        td_errors = torch.abs(q_values - target_q_values).detach().numpy().flatten()
         self.memory.update_priorities(indices, td_errors + 1e-5)
 
         loss = (weights * (q_values - target_q_values)**2).mean()
