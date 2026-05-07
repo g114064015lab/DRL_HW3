@@ -1,6 +1,7 @@
 import streamlit as st
 import numpy as np
 import random
+import time
 from collections import deque
 import torch
 import torch.nn as nn
@@ -175,9 +176,7 @@ if st.button("Start Training"):
     state = env.board.render_np().flatten()
     agent.epsilon = 0.0 # pure greedy
     
-    test_steps = []
-    st.text("Initial state:")
-    st.text(str(env.display()))
+    test_steps = [(env.display(), "Start", 0)]
     for step in range(max_steps):
         action_idx = agent.act(state)
         action = action_map[action_idx]
@@ -189,10 +188,36 @@ if st.button("Start Training"):
             break
         state = env.board.render_np().flatten()
         
+    board_placeholder = st.empty()
+    status_placeholder = st.empty()
+    
+    def render_board_html(board_array):
+        html = '<table style="border-collapse: collapse; text-align: center; margin-bottom: 20px;">'
+        for row in board_array:
+            html += '<tr>'
+            for cell in row:
+                color = "white"
+                if cell == 'P': color = "#4CAF50; color: white;" # Green Player
+                elif cell == '+': color = "#FFD700; color: black;" # Gold Goal
+                elif cell == '-': color = "#F44336; color: white;" # Red Pit
+                elif cell == 'W': color = "#9E9E9E; color: white;" # Grey Wall
+                else: color = "#f0f2f6; color: black;" # Empty cell
+                html += f'<td style="width: 60px; height: 60px; border: 2px solid #ccc; background: {color} font-weight: bold; font-size: 24px;">{cell}</td>'
+            html += '</tr>'
+        html += '</table>'
+        return html
+
     for i, (board_display, action, reward) in enumerate(test_steps):
-        st.write(f"**Step {i+1}**: Action `{action}`, Reward: `{reward}`")
-        st.text(str(board_display))
+        board_placeholder.markdown(render_board_html(board_display), unsafe_allow_html=True)
+        
+        status_text = f"**Step {i}**: Action: `{action}`, Reward: `{reward}`"
         if reward == 10:
-            st.success("Goal Reached!")
+            status_text += "\n\n🎉 **Goal Reached!**"
+            status_placeholder.success(status_text)
         elif reward == -10:
-            st.error("Fell into Pit!")
+            status_text += "\n\n💥 **Fell into Pit!**"
+            status_placeholder.error(status_text)
+        else:
+            status_placeholder.info(status_text)
+            
+        time.sleep(0.5)
